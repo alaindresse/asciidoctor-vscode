@@ -116,14 +116,10 @@ export class AntoraSupportManager implements vscode.Disposable {
     }
     AntoraSupportManager.instance = new AntoraSupportManager()
     AntoraSupportManager.workspaceState = workspaceState
-    const workspaceConfiguration = vscode.workspace.getConfiguration('asciidoc', null)
     // look for Antora support setting in workspace state
     const isEnableAntoraSupportSettingDefined = workspaceState.get('antoraSupportSetting')
     if (isEnableAntoraSupportSettingDefined === true) {
-      const enableAntoraSupport = workspaceConfiguration.get('antora.enableAntoraSupport')
-      if (enableAntoraSupport === true) {
-        AntoraSupportManager.instance.registerFeatures()
-      }
+      AntoraSupportManager.instance.registerFeatures()
     } else if (isEnableAntoraSupportSettingDefined === undefined) {
       // choice has not been made
       const onDidOpenAsciiDocFileAskAntoraSupport = vscode.workspace.onDidOpenTextDocument(async (textDocument) => {
@@ -135,9 +131,8 @@ export class AntoraSupportManager implements vscode.Disposable {
             yesAnswer,
             noAnswer
           )
-          const enableAntoraSupport = answer === yesAnswer ? true : (answer === noAnswer ? false : undefined)
+          const enableAntoraSupport = answer === yesAnswer
           await workspaceState.update('antoraSupportSetting', enableAntoraSupport)
-          await workspaceConfiguration.update('antora.enableAntoraSupport', enableAntoraSupport)
           if (enableAntoraSupport) {
             AntoraSupportManager.instance.registerFeatures()
           }
@@ -158,14 +153,10 @@ export class AntoraSupportManager implements vscode.Disposable {
   }
 
   public isEnabled (): Boolean {
-    const workspaceConfiguration = vscode.workspace.getConfiguration('asciidoc', null)
     // look for Antora support setting in workspace state
     const isEnableAntoraSupportSettingDefined = AntoraSupportManager.workspaceState.get('antoraSupportSetting')
     if (isEnableAntoraSupportSettingDefined === true) {
-      const enableAntoraSupport = workspaceConfiguration.get('antora.enableAntoraSupport')
-      if (enableAntoraSupport === true) {
-        return true
-      }
+      return true
     }
     // choice has not been made or Antora is explicitly disabled
     return false
