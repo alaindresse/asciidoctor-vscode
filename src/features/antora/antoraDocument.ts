@@ -230,7 +230,11 @@ export async function getAntoraDocumentContext(
     return undefined
   }
   try {
-    if (cachedAntoraContext === undefined) {
+    // Capture into a local variable so a FileSystemWatcher invalidation that
+    // fires mid-await cannot set cachedAntoraContext to undefined between the
+    // null-check and the subsequent use of the object.
+    let antoraContext = cachedAntoraContext
+    if (antoraContext === undefined) {
       const antoraConfigs = await getAntoraConfigs()
       const contentAggregate: { name: string; version: string; files: any[] }[] =
         await Promise.all(
@@ -294,15 +298,16 @@ export async function getAntoraDocumentContext(
         },
         contentAggregate,
       )
-      cachedAntoraContext = new AntoraContext(contentCatalog)
+      antoraContext = new AntoraContext(contentCatalog)
+      cachedAntoraContext = antoraContext
       setupCacheInvalidationWatchers()
     }
     const antoraResourceContext =
-      await cachedAntoraContext.getResource(textDocumentUri)
+      await antoraContext.getResource(textDocumentUri)
     if (antoraResourceContext === undefined) {
       return undefined
     }
-    return new AntoraDocumentContext(cachedAntoraContext, antoraResourceContext)
+    return new AntoraDocumentContext(antoraContext, antoraResourceContext)
   } catch (err) {
     console.error(`Unable to get Antora context for ${textDocumentUri}`, err)
     return undefined
