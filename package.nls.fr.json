@@ -2,6 +2,7 @@
   "asciidoc.antora.enableAntoraSupport.deprecationMessage": "Ce paramètre a été remplacé par `#asciidoc.antora.showEnableAntoraPrompt#` et n'a plus aucun effet.",
   "asciidoc.antora.enableAntoraSupport.desc": "Active le support [Antora](https://antora.org/).",
   "asciidoc.antora.showEnableAntoraPrompt.desc": "Affiche une fenêtre contextuelle permettant d'activer le support [Antora](https://antora.org/) quand un fichier antora.yml est trouvé.",
+  "asciidoc.antora.excludePathsMatching.desc": "Une liste d'expressions régulières. Tout fichier `antora.yml` dont le chemin correspond à au moins un de ces modèles est ignoré lors de la construction du catalogue de contenu Antora. Utile pour exclure les répertoires de dépendances ou générés (p. ex. `node_modules`).",
   "asciidoc.antora.title": "Antora",
   "asciidoc.asciidoctorpdf_command.deprecationMessage": "Ce paramètre a été remplacé par `#asciidoc.pdf.asciidoctorPdfCommandPath#` + `#asciidoc.pdf.asciidoctorPdfCommandArgs#` et n'a plus aucun effet.",
   "asciidoc.asciidoctorpdf_command.desc": "**Obsolète**: Chemin complet vers le binaire/exécutable `asciidoctor-pdf`.",

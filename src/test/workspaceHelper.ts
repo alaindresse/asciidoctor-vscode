@@ -1,4 +1,5 @@
 import vscode, { FileSystemError, FileType } from 'vscode'
+import { clearAntoraContextCache } from '../features/antora/antoraDocument'
 import { getDefaultWorkspaceFolderUri, normalizeUri } from '../util/workspace'
 import { extensionContext } from './helper'
 
@@ -97,4 +98,6 @@ export async function resetAntoraSupport() {
     'antoraSupportSetting',
     undefined,
   )
+  // Clear the catalog cache so the next test starts with a clean state.
+  clearAntoraContextCache()
 }

@@ -580,6 +580,16 @@
             "type": "boolean",
             "default": false,
             "markdownDescription": "%asciidoc.antora.showEnableAntoraPrompt.desc%"
+          },
+          "asciidoc.antora.excludePathsMatching": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [
+              "node_modules"
+            ],
+            "markdownDescription": "%asciidoc.antora.excludePathsMatching.desc%"
           }
         }
       }

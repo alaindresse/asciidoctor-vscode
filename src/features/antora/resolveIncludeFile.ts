@@ -1,5 +1,6 @@
 'use strict'
 
+import fs from 'fs'
 import ospath from 'path'
 
 const EXAMPLES_DIR_TOKEN = 'example$'
@@ -65,6 +66,19 @@ export function resolveIncludeFile(
   }
   if (resolved) {
     const resolvedSrc = resolved.src
+    // Lazy-load file content if the catalog was built without reading file contents upfront.
+    // absFsPath is the OS-native path stored alongside the URI-based abspath, ensuring
+    // correct behaviour on all platforms (including Windows where they differ).
+    if (!resolvedSrc.contents && (!resolved.contents || resolved.contents.length === 0)) {
+      const fsPath = resolvedSrc.absFsPath || resolvedSrc.abspath
+      if (fsPath) {
+        try {
+          resolved.contents = fs.readFileSync(fsPath)
+        } catch (err) {
+          console.error(`Unable to lazy-load content for include file at ${fsPath}:`, err)
+        }
+      }
+    }
     return {
       src: resolvedSrc,
       file: resolvedSrc.path,

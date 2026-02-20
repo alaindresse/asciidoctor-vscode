@@ -17,6 +17,69 @@ const classifyContent = contentClassifier.default || contentClassifier
 
 const MAX_DEPTH_SEARCH_ANTORA_CONFIG = 100
 
+// ---------------------------------------------------------------------------
+// Catalog cache
+//
+// Building the content catalog is expensive: it scans every antora.yml in the
+// workspace and reads all files under modules/*/. We cache the resulting
+// AntoraContext and invalidate it whenever a relevant file changes.
+// File *contents* are intentionally NOT loaded upfront; the include processor
+// lazy-loads them synchronously on demand (see resolveIncludeFile.ts).
+// ---------------------------------------------------------------------------
+let cachedAntoraContext: AntoraContext | undefined
+let watchersInitialized = false
+
+/**
+ * Returns compiled RegExp objects from the `asciidoc.antora.excludePathsMatching`
+ * configuration setting. Any antora.yml URI whose path matches one of these patterns
+ * is ignored when building the content catalog.
+ */
+function getAntoraExcludePatterns(): RegExp[] {
+  const patterns = vscode.workspace
+    .getConfiguration('asciidoc.antora')
+    .get<string[]>('excludePathsMatching', ['node_modules'])
+  return patterns.map((p) => new RegExp(p))
+}
+
+/**
+ * Filters a list of URIs, removing any whose path matches one of the configured
+ * exclude patterns (see `asciidoc.antora.excludePathsMatching`).
+ */
+function filterAntoraConfigUris(uris: Uri[]): Uri[] {
+  const excludePatterns = getAntoraExcludePatterns()
+  if (excludePatterns.length === 0) return uris
+  return uris.filter((uri) => !excludePatterns.some((rx) => rx.test(uri.path)))
+}
+
+/**
+ * Resets the module-level catalog cache.
+ * Intended for use in tests only to ensure isolation between test cases.
+ */
+export function clearAntoraContextCache(): void {
+  cachedAntoraContext = undefined
+}
+
+function setupCacheInvalidationWatchers(): void {
+  if (watchersInitialized) return
+  watchersInitialized = true
+
+  const invalidate = () => {
+    cachedAntoraContext = undefined
+  }
+
+  // Antora component descriptor changes
+  const configWatcher = vscode.workspace.createFileSystemWatcher('**/antora.yml')
+  configWatcher.onDidCreate(invalidate)
+  configWatcher.onDidChange(invalidate)
+  configWatcher.onDidDelete(invalidate)
+
+  // Any file change inside a modules/ tree (pages, partials, examples, images, attachments)
+  const contentWatcher = vscode.workspace.createFileSystemWatcher('**/modules/**')
+  contentWatcher.onDidCreate(invalidate)
+  contentWatcher.onDidChange(invalidate)
+  contentWatcher.onDidDelete(invalidate)
+}
+
 export async function findAntoraConfigFile(
   textDocumentUri: Uri,
 ): Promise<Uri | undefined> {
@@ -25,7 +88,7 @@ export async function findAntoraConfigFile(
   cancellationToken.token.onCancellationRequested((e) => {
     console.log('Cancellation requested, cause: ' + e)
   })
-  const antoraConfigUris = await findFiles('**/antora.yml')
+  const antoraConfigUris = filterAntoraConfigUris(await findFiles('**/antora.yml'))
   // check for Antora configuration
   for (const antoraConfigUri of antoraConfigUris) {
     const antoraConfigParentDirPath = antoraConfigUri.path.slice(
@@ -96,7 +159,7 @@ async function getAntoraConfigs(): Promise<AntoraConfig[]> {
   cancellationToken.token.onCancellationRequested((e) => {
     console.log('Cancellation requested, cause: ' + e)
   })
-  const antoraConfigUris = await findFiles('**/antora.yml')
+  const antoraConfigUris = filterAntoraConfigUris(await findFiles('**/antora.yml'))
   // check for Antora configuration
   const antoraConfigs = await Promise.all(
     antoraConfigUris.map(async (antoraConfigUri) => {
@@ -167,37 +230,37 @@ export async function getAntoraDocumentContext(
     return undefined
   }
   try {
-    const antoraConfigs = await getAntoraConfigs()
-    const contentAggregate: { name: string; version: string; files: any[] }[] =
-      await Promise.all(
-        antoraConfigs
-          .filter(
-            (antoraConfig) =>
-              antoraConfig.config !== undefined &&
-              'name' in antoraConfig.config &&
-              'version' in antoraConfig.config,
-          )
-          .map(async (antoraConfig) => {
-            const workspaceFolder = getWorkspaceFolder(antoraConfig.uri)
-            const workspaceRelative = posixpath.relative(
-              workspaceFolder.uri.path,
-              antoraConfig.contentSourceRootPath,
+    if (cachedAntoraContext === undefined) {
+      const antoraConfigs = await getAntoraConfigs()
+      const contentAggregate: { name: string; version: string; files: any[] }[] =
+        await Promise.all(
+          antoraConfigs
+            .filter(
+              (antoraConfig) =>
+                antoraConfig.config !== undefined &&
+                'name' in antoraConfig.config &&
+                'version' in antoraConfig.config,
             )
-            const globPattern =
-              'modules/*/{attachments,examples,images,pages,partials,assets}/**'
-            const files = await Promise.all(
-              (
+            .map(async (antoraConfig) => {
+              const workspaceFolder = getWorkspaceFolder(antoraConfig.uri)
+              const workspaceRelative = posixpath.relative(
+                workspaceFolder.uri.path,
+                antoraConfig.contentSourceRootPath,
+              )
+              const globPattern =
+                'modules/*/{attachments,examples,images,pages,partials,assets}/**'
+              // No async map needed: file contents are NOT read here.
+              // The include processor lazy-loads them synchronously on demand.
+              const files = (
                 await findFiles(
                   `${workspaceRelative ? `${workspaceRelative}/` : ''}${globPattern}`,
                 )
-              ).map(async (file) => {
+              ).map((file) => {
                 const contentSourceRootPath = antoraConfig.contentSourceRootPath
                 return {
                   base: contentSourceRootPath,
                   path: posixpath.relative(contentSourceRootPath, file.path),
-                  contents: Buffer.from(
-                    await vscode.workspace.fs.readFile(file),
-                  ),
+                  contents: Buffer.alloc(0),
                   extname: posixpath.extname(file.path),
                   stem: posixpath.basename(
                     file.path,
@@ -205,6 +268,7 @@ export async function getAntoraDocumentContext(
                   ),
                   src: {
                     abspath: file.path,
+                    absFsPath: file.fsPath,
                     basename: posixpath.basename(file.path),
                     editUrl: '',
                     extname: posixpath.extname(file.path),
@@ -215,29 +279,30 @@ export async function getAntoraDocumentContext(
                     ),
                   },
                 }
-              }),
-            )
-            return {
-              name: antoraConfig.config.name,
-              version: antoraConfig.config.version,
-              ...antoraConfig.config,
-              files,
-            }
-          }),
+              })
+              return {
+                name: antoraConfig.config.name,
+                version: antoraConfig.config.version,
+                ...antoraConfig.config,
+                files,
+              }
+            }),
+        )
+      const contentCatalog = await classifyContent(
+        {
+          site: {},
+        },
+        contentAggregate,
       )
-    const contentCatalog = await classifyContent(
-      {
-        site: {},
-      },
-      contentAggregate,
-    )
-    const antoraContext = new AntoraContext(contentCatalog)
+      cachedAntoraContext = new AntoraContext(contentCatalog)
+      setupCacheInvalidationWatchers()
+    }
     const antoraResourceContext =
-      await antoraContext.getResource(textDocumentUri)
+      await cachedAntoraContext.getResource(textDocumentUri)
     if (antoraResourceContext === undefined) {
       return undefined
     }
-    return new AntoraDocumentContext(antoraContext, antoraResourceContext)
+    return new AntoraDocumentContext(cachedAntoraContext, antoraResourceContext)
   } catch (err) {
     console.error(`Unable to get Antora context for ${textDocumentUri}`, err)
     return undefined
