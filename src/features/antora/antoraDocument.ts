@@ -21,13 +21,29 @@ const MAX_DEPTH_SEARCH_ANTORA_CONFIG = 100
 // Catalog cache
 //
 // Building the content catalog is expensive: it scans every antora.yml in the
-// workspace and reads all files under modules/*/. We cache the resulting
-// AntoraContext and invalidate it whenever a relevant file changes.
+// workspace and globs all files under modules/*/. We cache the resulting
+// AntoraContext and update it surgically when individual files change, so the
+// catalog is rebuilt only when the workspace structure changes (antora.yml
+// added/removed/changed, or a content file created/deleted).
+//
 // File *contents* are intentionally NOT loaded upfront; the include processor
-// lazy-loads them synchronously on demand (see resolveIncludeFile.ts).
+// lazy-loads them synchronously on demand (see resolveIncludeFile.ts). When a
+// content file is saved, the watcher clears its cached contents so the next
+// render re-reads the file from disk without rebuilding the whole catalog.
+//
+// Two additional Maps memoize the Antora config lookup that fires on every
+// render, avoiding repeated glob scans and YAML reads:
+//   antoraConfigFileCache  documentUri  → antora.yml Uri (or undefined)
+//   antoraConfigCache      antora.yml Uri → AntoraConfig
 // ---------------------------------------------------------------------------
 let cachedAntoraContext: AntoraContext | undefined
 let watchersInitialized = false
+// document URI string → antora.yml Uri (undefined = not in any Antora component).
+// Cleared when antora.yml files are created or deleted (mapping may change).
+const antoraConfigFileCache = new Map<string, Uri | undefined>()
+// antora.yml URI string → parsed AntoraConfig.
+// Entry removed when that specific antora.yml changes.
+const antoraConfigCache = new Map<string, AntoraConfig>()
 
 /**
  * Returns compiled RegExp objects from the `asciidoc.antora.excludePathsMatching`
@@ -57,38 +73,74 @@ function filterAntoraConfigUris(uris: Uri[]): Uri[] {
  */
 export function clearAntoraContextCache(): void {
   cachedAntoraContext = undefined
+  antoraConfigFileCache.clear()
+  antoraConfigCache.clear()
 }
 
 function setupCacheInvalidationWatchers(): void {
   if (watchersInitialized) return
   watchersInitialized = true
 
-  const invalidate = () => {
+  const invalidateAll = () => {
     cachedAntoraContext = undefined
   }
 
-  // Antora component descriptor changes
   const configWatcher = vscode.workspace.createFileSystemWatcher('**/antora.yml')
-  configWatcher.onDidCreate(invalidate)
-  configWatcher.onDidChange(invalidate)
-  configWatcher.onDidDelete(invalidate)
+  // A new antora.yml may claim documents that were previously unmapped.
+  // Clear everything so the next render starts fresh.
+  configWatcher.onDidCreate(() => {
+    antoraConfigFileCache.clear()
+    antoraConfigCache.clear()
+    invalidateAll()
+  })
+  // Content changed: the cached AntoraConfig for this file is stale.
+  // The document→antora.yml path mapping is unaffected (directory structure unchanged).
+  configWatcher.onDidChange((uri) => {
+    antoraConfigCache.delete(uri.toString())
+    invalidateAll()
+  })
+  // Deleted antora.yml: documents that were mapped to it are now unmapped.
+  configWatcher.onDidDelete((uri) => {
+    antoraConfigFileCache.clear()
+    antoraConfigCache.delete(uri.toString())
+    invalidateAll()
+  })
 
-  // Any file change inside a modules/ tree (pages, partials, examples, images, attachments)
   const contentWatcher = vscode.workspace.createFileSystemWatcher('**/modules/**')
-  contentWatcher.onDidCreate(invalidate)
-  contentWatcher.onDidChange(invalidate)
-  contentWatcher.onDidDelete(invalidate)
+
+  // A modified file only changes its content, not the catalog structure.
+  // Clear its cached contents so the include processor re-reads it on the next
+  // render without triggering a full catalog rebuild.
+  contentWatcher.onDidChange((uri) => {
+    const context = cachedAntoraContext
+    if (context === undefined) return
+    const file = context.contentCatalog
+      .getFiles()
+      .find((f: any) => f.src.absFsPath === uri.fsPath)
+    if (file) {
+      file.contents = Buffer.alloc(0)
+    }
+  })
+
+  // A created or deleted file changes the catalog structure — rebuild.
+  contentWatcher.onDidCreate(invalidateAll)
+  contentWatcher.onDidDelete(invalidateAll)
 }
 
 export async function findAntoraConfigFile(
   textDocumentUri: Uri,
 ): Promise<Uri | undefined> {
+  const cacheKey = textDocumentUri.toString()
+  if (antoraConfigFileCache.has(cacheKey)) {
+    return antoraConfigFileCache.get(cacheKey)
+  }
   const asciidocFilePath = posixpath.normalize(textDocumentUri.path)
   const cancellationToken = new CancellationTokenSource()
   cancellationToken.token.onCancellationRequested((e) => {
     console.log('Cancellation requested, cause: ' + e)
   })
   const antoraConfigUris = filterAntoraConfigUris(await findFiles('**/antora.yml'))
+  let result: Uri | undefined
   // check for Antora configuration
   for (const antoraConfigUri of antoraConfigUris) {
     const antoraConfigParentDirPath = antoraConfigUri.path.slice(
@@ -105,14 +157,18 @@ export async function findAntoraConfigFile(
       console.log(
         `Found an Antora configuration file at ${antoraConfigUri.path} for the AsciiDoc document ${asciidocFilePath}`,
       )
-      return antoraConfigUri
+      result = antoraConfigUri
+      break
     }
   }
-  const antoraConfigPaths = antoraConfigUris.map((uri) => uri.path)
-  console.log(
-    `Unable to find an applicable Antora configuration file in [${antoraConfigPaths.join(', ')}] for the AsciiDoc document ${asciidocFilePath}`,
-  )
-  return undefined
+  if (result === undefined) {
+    const antoraConfigPaths = antoraConfigUris.map((uri) => uri.path)
+    console.log(
+      `Unable to find an applicable Antora configuration file in [${antoraConfigPaths.join(', ')}] for the AsciiDoc document ${asciidocFilePath}`,
+    )
+  }
+  antoraConfigFileCache.set(cacheKey, result)
+  return result
 }
 
 export async function antoraConfigFileExists(
@@ -200,6 +256,10 @@ export async function getAntoraConfig(
   if (antoraConfigUri === undefined) {
     return undefined
   }
+  const cacheKey = antoraConfigUri.toString()
+  if (antoraConfigCache.has(cacheKey)) {
+    return antoraConfigCache.get(cacheKey)
+  }
   let config = {}
   try {
     config = yaml.load(fs.readFileSync(antoraConfigUri.fsPath, 'utf8')) || {}
@@ -208,7 +268,9 @@ export async function getAntoraConfig(
       `Unable to parse ${antoraConfigUri.fsPath}, cause:` + err.toString(),
     )
   }
-  return new AntoraConfig(antoraConfigUri, config)
+  const antoraConfig = new AntoraConfig(antoraConfigUri, config)
+  antoraConfigCache.set(cacheKey, antoraConfig)
+  return antoraConfig
 }
 
 export async function getAttributes(
