@@ -1,0 +1,31 @@
+# Compiled output
+dist/
+out/
+
+# Dependencies
+node_modules/
+
+# Test artifacts
+.vscode-test/
+coverage/
+
+# Vendored media assets (large, not project code)
+media/highlightjs/
+media/font-awesome/
+media/mathjax/
+media/mermaid/
+media/fonts/
+
+# Build artifacts
+*.vsix
+*.map
+
+# Cache
+.asciidoctor/
+
+# Examples and samples (not source code)
+examples/
+test/samples/
+
+# Localization bundles (generated)
+l10n/
