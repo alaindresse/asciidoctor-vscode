@@ -4,7 +4,10 @@ import yaml from 'js-yaml'
 import { posix as posixpath } from 'path'
 import vscode, { CancellationTokenSource, FileType, Memento, Uri } from 'vscode'
 import { dir, exists } from '../../util/file'
-import { findFiles } from '../../util/findFiles'
+import {
+  findAntoraConfigFiles,
+  findAntoraContentFiles,
+} from '../../util/findFiles'
 import { getWorkspaceFolder } from '../../util/workspace'
 import {
   AntoraConfig,
@@ -25,7 +28,7 @@ export async function findAntoraConfigFile(
   cancellationToken.token.onCancellationRequested((e) => {
     console.log('Cancellation requested, cause: ' + e)
   })
-  const antoraConfigUris = await findFiles('**/antora.yml')
+  const antoraConfigUris = await findAntoraConfigFiles()
   // check for Antora configuration
   for (const antoraConfigUri of antoraConfigUris) {
     const antoraConfigParentDirPath = antoraConfigUri.path.slice(
@@ -96,7 +99,7 @@ async function getAntoraConfigs(): Promise<AntoraConfig[]> {
   cancellationToken.token.onCancellationRequested((e) => {
     console.log('Cancellation requested, cause: ' + e)
   })
-  const antoraConfigUris = await findFiles('**/antora.yml')
+  const antoraConfigUris = await findAntoraConfigFiles()
   // check for Antora configuration
   const antoraConfigs = await Promise.all(
     antoraConfigUris.map(async (antoraConfigUri) => {
@@ -183,13 +186,9 @@ export async function getAntoraDocumentContext(
               workspaceFolder.uri.path,
               antoraConfig.contentSourceRootPath,
             )
-            const globPattern =
-              'modules/*/{attachments,examples,images,pages,partials,assets}/**'
             const files = await Promise.all(
               (
-                await findFiles(
-                  `${workspaceRelative ? `${workspaceRelative}/` : ''}${globPattern}`,
-                )
+                await findAntoraContentFiles(workspaceRelative || undefined)
               ).map(async (file) => {
                 const contentSourceRootPath = antoraConfig.contentSourceRootPath
                 return {
