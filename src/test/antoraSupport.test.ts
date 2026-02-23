@@ -1,5 +1,7 @@
 import * as assert from 'assert'
+import fs from 'fs'
 import os from 'os'
+import sinon from 'sinon'
 import * as vscode from 'vscode'
 import 'mocha'
 import {
@@ -364,6 +366,96 @@ version: ~
       console.error('Something bad happened!', err)
       throw err
     } finally {
+      await removeFiles(createdFiles)
+      await resetAntoraSupport()
+    }
+  })
+
+  test('Should lazy-load file contents: zero reads during catalog build, one read on first access, none on subsequent accesses', async () => {
+    const createdFiles: vscode.Uri[] = []
+    const readSpy = sinon.spy(fs, 'readFileSync')
+    try {
+      createdFiles.push(await createDirectory('lazy-load-test'))
+      await createDirectories('lazy-load-test', 'modules', 'ROOT', 'pages')
+      await createDirectories('lazy-load-test', 'modules', 'ROOT', 'partials')
+      const asciidocFile = await createFile(
+        'include::partial$shared.adoc[]',
+        'lazy-load-test',
+        'modules',
+        'ROOT',
+        'pages',
+        'index.adoc',
+      )
+      createdFiles.push(asciidocFile)
+      createdFiles.push(
+        await createFile(
+          '= Shared Content',
+          'lazy-load-test',
+          'modules',
+          'ROOT',
+          'partials',
+          'shared.adoc',
+        ),
+      )
+      createdFiles.push(
+        await createFile(
+          "name: lazy-test\nversion: ~\n",
+          'lazy-load-test',
+          'antora.yml',
+        ),
+      )
+
+      await enableAntoraSupport()
+      const workspaceState = extensionContext.workspaceState
+
+      // Capture read count before building the catalog.
+      // getAntoraDocumentContext uses vscode.workspace.fs.readFile (async) for
+      // antora.yml and the cached findAntoraContentFiles for file listing, so
+      // fs.readFileSync should NOT be called during catalog construction.
+      const callsBefore = readSpy.callCount
+      const result = await getAntoraDocumentContext(asciidocFile, workspaceState)
+      const callsAfterBuild = readSpy.callCount
+
+      assert.strictEqual(
+        callsAfterBuild,
+        callsBefore,
+        `readFileSync must not be called during catalog build (was called ${callsAfterBuild - callsBefore} extra time(s))`,
+      )
+
+      // Locate the partial in the catalog via family + basename (avoids
+      // needing to know the exact version string for `getById`).
+      const catalog = result.getContentCatalog()
+      const partial = catalog
+        .findBy({ family: 'partial' })
+        .find((f) => f.src.basename === 'shared.adoc')
+      assert.ok(partial != null, 'partial shared.adoc must be found in the catalog')
+
+      // First access of .contents should trigger exactly one read.
+      const contents = partial.contents
+      assert.strictEqual(
+        readSpy.callCount,
+        callsBefore + 1,
+        'readFileSync must be called exactly once on first .contents access',
+      )
+      assert.strictEqual(
+        contents.toString(),
+        '= Shared Content',
+        'contents must match what was written to disk',
+      )
+
+      // Second access must be served from the memoised value.
+      const contents2 = partial.contents
+      assert.strictEqual(
+        readSpy.callCount,
+        callsBefore + 1,
+        'readFileSync must NOT be called again on subsequent .contents access',
+      )
+      assert.strictEqual(contents2.toString(), '= Shared Content')
+    } catch (err) {
+      console.error('Something bad happened!', err)
+      throw err
+    } finally {
+      readSpy.restore()
       await removeFiles(createdFiles)
       await resetAntoraSupport()
     }

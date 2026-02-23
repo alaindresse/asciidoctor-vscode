@@ -171,6 +171,9 @@ export async function getAntoraDocumentContext(
   }
   try {
     const antoraConfigs = await getAntoraConfigs()
+    // Map from a file's absolute path string to its local fsPath, used to
+    // install lazy content loaders after the catalog is classified.
+    const fsPathByAbsPath = new Map<string, string>()
     const contentAggregate: { name: string; version: string; files: any[] }[] =
       await Promise.all(
         antoraConfigs
@@ -186,36 +189,36 @@ export async function getAntoraDocumentContext(
               workspaceFolder.uri.path,
               antoraConfig.contentSourceRootPath,
             )
-            const files = await Promise.all(
-              (
-                await findAntoraContentFiles(workspaceRelative || undefined)
-              ).map(async (file) => {
-                const contentSourceRootPath = antoraConfig.contentSourceRootPath
-                return {
-                  base: contentSourceRootPath,
-                  path: posixpath.relative(contentSourceRootPath, file.path),
-                  contents: Buffer.from(
-                    await vscode.workspace.fs.readFile(file),
-                  ),
-                  extname: posixpath.extname(file.path),
-                  stem: posixpath.basename(
-                    file.path,
-                    posixpath.extname(file.path),
-                  ),
-                  src: {
-                    abspath: file.path,
-                    basename: posixpath.basename(file.path),
-                    editUrl: '',
-                    extname: posixpath.extname(file.path),
-                    path: file.path,
-                    stem: posixpath.basename(
-                      file.path,
-                      posixpath.extname(file.path),
-                    ),
-                  },
-                }
-              }),
+            const contentSourceRootPath = antoraConfig.contentSourceRootPath
+            const contentFilesUris = await findAntoraContentFiles(
+              workspaceRelative || undefined,
             )
+            for (const uri of contentFilesUris) {
+              fsPathByAbsPath.set(uri.path, uri.fsPath)
+            }
+            const files = contentFilesUris.map((fileUri) => ({
+              base: contentSourceRootPath,
+              path: posixpath.relative(contentSourceRootPath, fileUri.path),
+              // contents is intentionally null here; lazy loaders are
+              // installed on the classified Vinyl files after classifyContent.
+              contents: null as Buffer | null,
+              extname: posixpath.extname(fileUri.path),
+              stem: posixpath.basename(
+                fileUri.path,
+                posixpath.extname(fileUri.path),
+              ),
+              src: {
+                abspath: fileUri.path,
+                basename: posixpath.basename(fileUri.path),
+                editUrl: '',
+                extname: posixpath.extname(fileUri.path),
+                path: fileUri.path,
+                stem: posixpath.basename(
+                  fileUri.path,
+                  posixpath.extname(fileUri.path),
+                ),
+              },
+            }))
             return {
               name: antoraConfig.config.name,
               version: antoraConfig.config.version,
@@ -224,12 +227,38 @@ export async function getAntoraDocumentContext(
             }
           }),
       )
-    const contentCatalog = await classifyContent(
+    const contentCatalog = classifyContent(
       {
         site: {},
       },
       contentAggregate,
     )
+    // Install a lazy `contents` accessor on every classified Vinyl file so
+    // that the file is only read from disk when its contents are actually
+    // needed (e.g. by the include processor), not during catalog construction.
+    for (const file of contentCatalog.findBy({})) {
+      const localFsPath = fsPathByAbsPath.get(file.src.abspath)
+      if (!localFsPath) {
+        continue
+      }
+      let lazyContents: Buffer | null = null
+      let loaded = false
+      Object.defineProperty(file, 'contents', {
+        get(): Buffer | null {
+          if (!loaded) {
+            lazyContents = fs.readFileSync(localFsPath)
+            loaded = true
+          }
+          return lazyContents
+        },
+        set(v: Buffer | null): void {
+          lazyContents = v
+          loaded = true
+        },
+        configurable: true,
+        enumerable: true,
+      })
+    }
     const antoraContext = new AntoraContext(contentCatalog)
     const antoraResourceContext =
       await antoraContext.getResource(textDocumentUri)
