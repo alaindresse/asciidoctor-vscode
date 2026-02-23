@@ -27,6 +27,7 @@ import {
   PreviewSecuritySelector,
 } from './security'
 import { AsciidocTargetPathAutoCompletionMonitor } from './util/includeAutoCompletion'
+import { disposeContentAggregateCache } from './features/antora/antoraDocument'
 import { disposeAntoraFileWatchers } from './util/findFiles'
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -97,6 +98,7 @@ export async function activate(context: vscode.ExtensionContext) {
     AntoraSupportManager.getInstance(context.workspaceState),
   )
   context.subscriptions.push({ dispose: disposeAntoraFileWatchers })
+  context.subscriptions.push({ dispose: disposeContentAggregateCache })
   context.subscriptions.push(
     vscode.languages.registerDocumentSymbolProvider(selector, symbolProvider),
   )

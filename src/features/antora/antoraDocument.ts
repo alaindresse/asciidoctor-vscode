@@ -20,6 +20,143 @@ const classifyContent = contentClassifier.default || contentClassifier
 
 const MAX_DEPTH_SEARCH_ANTORA_CONFIG = 100
 
+// ---------------------------------------------------------------------------
+// Content-aggregate cache
+// ---------------------------------------------------------------------------
+
+/** Glob pattern for the aggregate content-file watcher (all Antora families). */
+const ANTORA_CONTENT_WATCHER_GLOB =
+  '**/modules/*/{attachments,examples,images,pages,partials,assets}/**'
+
+/** Shape of a single file entry inside a content-aggregate component bucket. */
+type AggregateFile = {
+  base: string
+  path: string
+  contents: Buffer | null
+  extname: string
+  stem: string
+  src: {
+    abspath: string
+    basename: string
+    editUrl: string
+    extname: string
+    path: string
+    stem: string
+  }
+}
+
+type ContentAggregateCache = {
+  /** The aggregate array passed to classifyContent. */
+  entries: any[]
+  /**
+   * Parallel to `entries`: `rootPaths[i]` is the contentSourceRootPath
+   * (POSIX) for `entries[i]`.  Used to route watcher events to the right
+   * component bucket.
+   */
+  rootPaths: string[]
+  /** Maps uri.path (POSIX abs path) → uri.fsPath (platform path) for lazy loaders. */
+  fsPathByAbsPath: Map<string, string>
+}
+
+let _aggregateCache: ContentAggregateCache | undefined
+let _aggregateWatchersCreated = false
+const _aggregateDisposables: vscode.Disposable[] = []
+
+/** Construct the file-object shape that classifyContent expects. */
+function buildAggregateFile(fileUri: Uri, contentSourceRootPath: string): AggregateFile {
+  const absPath = fileUri.path
+  const extname = posixpath.extname(absPath)
+  const stem = posixpath.basename(absPath, extname)
+  return {
+    base: contentSourceRootPath,
+    path: posixpath.relative(contentSourceRootPath, absPath),
+    contents: null,
+    extname,
+    stem,
+    src: {
+      abspath: absPath,
+      basename: posixpath.basename(absPath),
+      editUrl: '',
+      extname,
+      path: absPath,
+      stem,
+    },
+  }
+}
+
+function ensureAggregateWatchers(): void {
+  if (_aggregateWatchersCreated) {
+    return
+  }
+  _aggregateWatchersCreated = true
+
+  // --- content-file watcher: surgical cache updates ---
+  const contentWatcher = vscode.workspace.createFileSystemWatcher(ANTORA_CONTENT_WATCHER_GLOB)
+  _aggregateDisposables.push(
+    contentWatcher,
+    contentWatcher.onDidCreate((uri) => {
+      if (_aggregateCache === undefined) {
+        return
+      }
+      const { entries, rootPaths, fsPathByAbsPath } = _aggregateCache
+      const absPath = uri.path
+      const idx = rootPaths.findIndex((r) => absPath.startsWith(r + '/'))
+      if (idx !== -1) {
+        entries[idx].files.push(buildAggregateFile(uri, rootPaths[idx]))
+        fsPathByAbsPath.set(absPath, uri.fsPath)
+      }
+    }),
+    contentWatcher.onDidChange((uri) => {
+      if (_aggregateCache === undefined) {
+        return
+      }
+      const absPath = uri.path
+      for (const entry of _aggregateCache.entries) {
+        const file = entry.files.find((f: AggregateFile) => f.src.abspath === absPath)
+        if (file !== undefined) {
+          // Reset to unloaded so the next classification picks up fresh contents.
+          file.contents = null
+          break
+        }
+      }
+    }),
+    contentWatcher.onDidDelete((uri) => {
+      if (_aggregateCache === undefined) {
+        return
+      }
+      const { entries, rootPaths, fsPathByAbsPath } = _aggregateCache
+      const absPath = uri.path
+      const idx = rootPaths.findIndex((r) => absPath.startsWith(r + '/'))
+      if (idx !== -1) {
+        entries[idx].files = entries[idx].files.filter(
+          (f: AggregateFile) => f.src.abspath !== absPath,
+        )
+        fsPathByAbsPath.delete(absPath)
+      }
+    }),
+  )
+
+  // --- antora.yml watcher: invalidate whole cache when component configs change ---
+  const configWatcher = vscode.workspace.createFileSystemWatcher('**/antora.yml')
+  _aggregateDisposables.push(
+    configWatcher,
+    configWatcher.onDidCreate(() => { _aggregateCache = undefined }),
+    configWatcher.onDidDelete(() => { _aggregateCache = undefined }),
+    configWatcher.onDidChange(() => { _aggregateCache = undefined }),
+  )
+}
+
+export function disposeContentAggregateCache(): void {
+  for (const d of _aggregateDisposables) {
+    d.dispose()
+  }
+  _aggregateDisposables.length = 0
+  _aggregateWatchersCreated = false
+  _aggregateCache = undefined
+}
+
+// ---------------------------------------------------------------------------
+
 export async function findAntoraConfigFile(
   textDocumentUri: Uri,
 ): Promise<Uri | undefined> {
@@ -170,12 +307,20 @@ export async function getAntoraDocumentContext(
     return undefined
   }
   try {
-    const antoraConfigs = await getAntoraConfigs()
-    // Map from a file's absolute path string to its local fsPath, used to
-    // install lazy content loaders after the catalog is classified.
-    const fsPathByAbsPath = new Map<string, string>()
-    const contentAggregate: { name: string; version: string; files: any[] }[] =
-      await Promise.all(
+    ensureAggregateWatchers()
+
+    let contentAggregate: any[]
+    let fsPathByAbsPath: Map<string, string>
+
+    if (_aggregateCache !== undefined) {
+      contentAggregate = _aggregateCache.entries
+      fsPathByAbsPath = _aggregateCache.fsPathByAbsPath
+    } else {
+      const antoraConfigs = await getAntoraConfigs()
+      fsPathByAbsPath = new Map<string, string>()
+      const rootPaths: string[] = []
+
+      contentAggregate = await Promise.all(
         antoraConfigs
           .filter(
             (antoraConfig) =>
@@ -190,35 +335,18 @@ export async function getAntoraDocumentContext(
               antoraConfig.contentSourceRootPath,
             )
             const contentSourceRootPath = antoraConfig.contentSourceRootPath
+            // rootPaths.push is synchronous and happens before the first await
+            // below, so the index always matches the Promise.all result order.
+            rootPaths.push(contentSourceRootPath)
             const contentFilesUris = await findAntoraContentFiles(
               workspaceRelative || undefined,
             )
             for (const uri of contentFilesUris) {
               fsPathByAbsPath.set(uri.path, uri.fsPath)
             }
-            const files = contentFilesUris.map((fileUri) => ({
-              base: contentSourceRootPath,
-              path: posixpath.relative(contentSourceRootPath, fileUri.path),
-              // contents is intentionally null here; lazy loaders are
-              // installed on the classified Vinyl files after classifyContent.
-              contents: null as Buffer | null,
-              extname: posixpath.extname(fileUri.path),
-              stem: posixpath.basename(
-                fileUri.path,
-                posixpath.extname(fileUri.path),
-              ),
-              src: {
-                abspath: fileUri.path,
-                basename: posixpath.basename(fileUri.path),
-                editUrl: '',
-                extname: posixpath.extname(fileUri.path),
-                path: fileUri.path,
-                stem: posixpath.basename(
-                  fileUri.path,
-                  posixpath.extname(fileUri.path),
-                ),
-              },
-            }))
+            const files = contentFilesUris.map((fileUri) =>
+              buildAggregateFile(fileUri, contentSourceRootPath),
+            )
             return {
               name: antoraConfig.config.name,
               version: antoraConfig.config.version,
@@ -227,6 +355,10 @@ export async function getAntoraDocumentContext(
             }
           }),
       )
+
+      _aggregateCache = { entries: contentAggregate, rootPaths, fsPathByAbsPath }
+    }
+
     const contentCatalog = classifyContent(
       {
         site: {},
