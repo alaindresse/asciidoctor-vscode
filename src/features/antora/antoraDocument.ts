@@ -46,11 +46,21 @@ type AggregateFile = {
 }
 
 type ContentAggregateCache = {
-  /** The aggregate array passed to classifyContent. */
-  entries: any[]
   /**
-   * Parallel to `entries`: `rootPaths[i]` is the contentSourceRootPath
-   * (POSIX) for `entries[i]`.  Used to route watcher events to the right
+   * Per-component descriptor objects WITHOUT the `files` property.
+   * Stored separately because `classifyContent` mutates `componentVersionData.files = undefined`
+   * to free memory, which would corrupt the cache if we stored the full entry objects.
+   */
+  descriptors: any[]
+  /**
+   * Per-component file lists, parallel to `descriptors`.
+   * `filesByComponent[i]` is the files array for `descriptors[i]`.
+   * Kept separate so watchers can update files without touching the descriptors.
+   */
+  filesByComponent: AggregateFile[][]
+  /**
+   * Parallel to `descriptors`: `rootPaths[i]` is the contentSourceRootPath
+   * (POSIX) for `descriptors[i]`.  Used to route watcher events to the right
    * component bucket.
    */
   rootPaths: string[]
@@ -98,11 +108,11 @@ function ensureAggregateWatchers(): void {
       if (_aggregateCache === undefined) {
         return
       }
-      const { entries, rootPaths, fsPathByAbsPath } = _aggregateCache
+      const { filesByComponent, rootPaths, fsPathByAbsPath } = _aggregateCache
       const absPath = uri.path
       const idx = rootPaths.findIndex((r) => absPath.startsWith(r + '/'))
       if (idx !== -1) {
-        entries[idx].files.push(buildAggregateFile(uri, rootPaths[idx]))
+        filesByComponent[idx].push(buildAggregateFile(uri, rootPaths[idx]))
         fsPathByAbsPath.set(absPath, uri.fsPath)
       }
     }),
@@ -111,8 +121,8 @@ function ensureAggregateWatchers(): void {
         return
       }
       const absPath = uri.path
-      for (const entry of _aggregateCache.entries) {
-        const file = entry.files.find((f: AggregateFile) => f.src.abspath === absPath)
+      for (const files of _aggregateCache.filesByComponent) {
+        const file = files.find((f: AggregateFile) => f.src.abspath === absPath)
         if (file !== undefined) {
           // Reset to unloaded so the next classification picks up fresh contents.
           file.contents = null
@@ -124,11 +134,11 @@ function ensureAggregateWatchers(): void {
       if (_aggregateCache === undefined) {
         return
       }
-      const { entries, rootPaths, fsPathByAbsPath } = _aggregateCache
+      const { filesByComponent, rootPaths, fsPathByAbsPath } = _aggregateCache
       const absPath = uri.path
       const idx = rootPaths.findIndex((r) => absPath.startsWith(r + '/'))
       if (idx !== -1) {
-        entries[idx].files = entries[idx].files.filter(
+        filesByComponent[idx] = filesByComponent[idx].filter(
           (f: AggregateFile) => f.src.abspath !== absPath,
         )
         fsPathByAbsPath.delete(absPath)
@@ -313,14 +323,19 @@ export async function getAntoraDocumentContext(
     let fsPathByAbsPath: Map<string, string>
 
     if (_aggregateCache !== undefined) {
-      contentAggregate = _aggregateCache.entries
+      // Reconstruct fresh entry objects each time so that classifyContent's
+      // mutation (`componentVersionData.files = undefined`) does not corrupt
+      // the cached file lists.
+      contentAggregate = _aggregateCache.descriptors.map((desc, i) => ({
+        ...desc,
+        files: _aggregateCache!.filesByComponent[i],
+      }))
       fsPathByAbsPath = _aggregateCache.fsPathByAbsPath
     } else {
       const antoraConfigs = await getAntoraConfigs()
       fsPathByAbsPath = new Map<string, string>()
-      const rootPaths: string[] = []
 
-      contentAggregate = await Promise.all(
+      const rawEntries = await Promise.all(
         antoraConfigs
           .filter(
             (antoraConfig) =>
@@ -335,9 +350,6 @@ export async function getAntoraDocumentContext(
               antoraConfig.contentSourceRootPath,
             )
             const contentSourceRootPath = antoraConfig.contentSourceRootPath
-            // rootPaths.push is synchronous and happens before the first await
-            // below, so the index always matches the Promise.all result order.
-            rootPaths.push(contentSourceRootPath)
             const contentFilesUris = await findAntoraContentFiles(
               workspaceRelative || undefined,
             )
@@ -347,16 +359,28 @@ export async function getAntoraDocumentContext(
             const files = contentFilesUris.map((fileUri) =>
               buildAggregateFile(fileUri, contentSourceRootPath),
             )
-            return {
+            // Separate descriptor (without files) from files so that
+            // classifyContent's mutation of `files` does not corrupt the cache.
+            const descriptor = {
               name: antoraConfig.config.name,
               version: antoraConfig.config.version,
               ...antoraConfig.config,
-              files,
             }
+            return { descriptor, files, contentSourceRootPath }
           }),
       )
 
-      _aggregateCache = { entries: contentAggregate, rootPaths, fsPathByAbsPath }
+      const descriptors: any[] = []
+      const filesByComponent: AggregateFile[][] = []
+      const rootPaths: string[] = []
+      for (const { descriptor, files, contentSourceRootPath } of rawEntries) {
+        descriptors.push(descriptor)
+        filesByComponent.push(files)
+        rootPaths.push(contentSourceRootPath)
+      }
+
+      contentAggregate = descriptors.map((desc, i) => ({ ...desc, files: filesByComponent[i] }))
+      _aggregateCache = { descriptors, filesByComponent, rootPaths, fsPathByAbsPath }
     }
 
     const contentCatalog = classifyContent(
