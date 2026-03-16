@@ -17,6 +17,55 @@ const classifyContent = contentClassifier.default || contentClassifier
 
 const MAX_DEPTH_SEARCH_ANTORA_CONFIG = 100
 
+const ANTORA_FAMILY_DIRS = ['attachments', 'examples', 'images', 'pages', 'partials', 'assets']
+
+/**
+ * Recursively collect symlinked files under a directory.
+ */
+async function collectSymlinkedFiles (dirUri: Uri, result: Uri[]): Promise<void> {
+  let entries: [string, FileType][]
+  try {
+    entries = await vscode.workspace.fs.readDirectory(dirUri)
+  } catch {
+    return
+  }
+  for (const [name, type] of entries) {
+    const childUri = Uri.joinPath(dirUri, name)
+    if ((type & FileType.SymbolicLink) !== 0 && (type & FileType.File) !== 0) {
+      result.push(childUri)
+    }
+    if ((type & FileType.Directory) !== 0) {
+      await collectSymlinkedFiles(childUri, result)
+    }
+  }
+}
+
+/**
+ * Find symlinked files inside the Antora family directories for a content source root.
+ * vscode.workspace.findFiles does not reliably return symlinked files, so we
+ * walk the known family directories and collect symlinks explicitly.
+ */
+async function findSymlinkedFilesInAntoraContent (contentSourceRootUri: Uri): Promise<Uri[]> {
+  const result: Uri[] = []
+  const modulesUri = Uri.joinPath(contentSourceRootUri, 'modules')
+  let moduleEntries: [string, FileType][]
+  try {
+    moduleEntries = await vscode.workspace.fs.readDirectory(modulesUri)
+  } catch {
+    return result
+  }
+  for (const [moduleName, moduleType] of moduleEntries) {
+    if ((moduleType & FileType.Directory) === 0) {
+      continue
+    }
+    for (const familyDir of ANTORA_FAMILY_DIRS) {
+      const familyUri = Uri.joinPath(modulesUri, moduleName, familyDir)
+      await collectSymlinkedFiles(familyUri, result)
+    }
+  }
+  return result
+}
+
 export async function findAntoraConfigFile(
   textDocumentUri: Uri,
 ): Promise<Uri | undefined> {
@@ -185,12 +234,21 @@ export async function getAntoraDocumentContext(
             )
             const globPattern =
               'modules/*/{attachments,examples,images,pages,partials,assets}/**'
+            const foundFiles = await findFiles(
+              `${workspaceRelative ? `${workspaceRelative}/` : ''}${globPattern}`,
+            )
+            // findFiles does not reliably return symlinked files — discover them explicitly
+            const symlinkedFiles = await findSymlinkedFilesInAntoraContent(
+              antoraConfig.uri.with({ path: antoraConfig.contentSourceRootPath }),
+            )
+            const existingPaths = new Set(foundFiles.map((f) => f.path))
+            for (const sf of symlinkedFiles) {
+              if (!existingPaths.has(sf.path)) {
+                foundFiles.push(sf)
+              }
+            }
             const files = await Promise.all(
-              (
-                await findFiles(
-                  `${workspaceRelative ? `${workspaceRelative}/` : ''}${globPattern}`,
-                )
-              ).map(async (file) => {
+              foundFiles.map(async (file) => {
                 const contentSourceRootPath = antoraConfig.contentSourceRootPath
                 return {
                   base: contentSourceRootPath,

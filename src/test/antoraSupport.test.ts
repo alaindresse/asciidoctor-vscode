@@ -318,6 +318,91 @@ version: '7.1'
   })
 })
 
+suite('Antora support with symlinked files in content catalog', () => {
+  test('Should include symlinked files in content catalog', async () => {
+    // symlink does not work on Windows
+    if (os.platform() === 'win32') {
+      return
+    }
+    const createdFiles = []
+    try {
+      createdFiles.push(await createDirectory('symlink-test'))
+      await createDirectories('symlink-test', 'modules', 'ROOT', 'pages')
+      await createDirectories('symlink-test', 'modules', 'ROOT', 'partials')
+      const asciidocFile = await createFile(
+        `= Symlink Test
+
+include::partial$link-to-test.ts[]
+`,
+        'symlink-test',
+        'modules',
+        'ROOT',
+        'pages',
+        'index.adoc',
+      )
+      // create a real file
+      await createFile(
+        'export const x = 1',
+        'symlink-test',
+        'modules',
+        'ROOT',
+        'partials',
+        'test.ts',
+      )
+      // create a symlink to the file
+      await createLink(
+        ['symlink-test', 'modules', 'ROOT', 'partials', 'test.ts'],
+        ['symlink-test', 'modules', 'ROOT', 'partials', 'link-to-test.ts'],
+      )
+      await createFile(
+        `name: symlink-test
+version: '1.0'
+`,
+        'symlink-test',
+        'antora.yml',
+      )
+      await enableAntoraSupport()
+      const workspaceState = extensionContext.workspaceState
+      const result = await getAntoraDocumentContext(
+        asciidocFile,
+        workspaceState,
+      )
+      const component = result
+        .getComponents()
+        .find(
+          (c) =>
+            c.versions.find(
+              (v) => v.name === 'symlink-test' && v.version === '1.0',
+            ) !== undefined,
+        )
+      assert.strictEqual(
+        component !== undefined,
+        true,
+        'Component symlink-test:1.0 must exist',
+      )
+      // Check that the symlinked file is in the partials
+      const partials = result.getContentCatalog().findBy({ family: 'partial' })
+      const partialNames = partials.map((p) => p.src.basename)
+      assert.strictEqual(
+        partialNames.includes('test.ts'),
+        true,
+        'test.ts must be in partials',
+      )
+      assert.strictEqual(
+        partialNames.includes('link-to-test.ts'),
+        true,
+        'link-to-test.ts (symlink) must be in partials',
+      )
+    } catch (err) {
+      console.error('Something bad happened!', err)
+      throw err
+    } finally {
+      await removeFiles(createdFiles)
+      await resetAntoraSupport()
+    }
+  })
+})
+
 suite('Antora support with single documentation component', () => {
   test('Should build content catalog', async () => {
     const createdFiles = []
