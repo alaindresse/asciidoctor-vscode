@@ -26,6 +26,7 @@ import {
   ExtensionContentSecurityPolicyArbiter,
   PreviewSecuritySelector,
 } from './security'
+import { disposeFindFilesCache } from './util/findFiles'
 import { AsciidocTargetPathAutoCompletionMonitor } from './util/includeAutoCompletion'
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -222,4 +223,6 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     }),
   )
+
+  context.subscriptions.push({ dispose: disposeFindFilesCache })
 }

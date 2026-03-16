@@ -56,11 +56,18 @@ export class AsciidoctorExtensions {
   }
 
   private async registerExtensionsInWorkspace(registry) {
-    const extensionsTrusted = await this.confirmAsciidoctorExtensionsTrusted()
-    if (!extensionsTrusted) {
+    if (!this.isAsciidoctorExtensionsRegistrationEnabled()) {
       return
     }
     const extfiles = await this.getExtensionFilesInWorkspace()
+    if (extfiles.length === 0) {
+      return
+    }
+    const trusted = await this.asciidoctorExtensionsSecurityPolicy
+      .confirmAsciidoctorExtensionsTrustMode(extfiles.length)
+    if (!trusted) {
+      return
+    }
     for (const extfile of extfiles) {
       const extPath = extfile.fsPath
       try {
