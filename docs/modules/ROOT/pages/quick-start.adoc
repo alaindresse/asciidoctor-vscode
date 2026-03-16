@@ -1,3 +1,17 @@
 = Quick Start
 
 The extension activates automatically when opening an AsciiDoc file (.adoc, .ad, .asc, .asciidoc).
+
+Include of source file:
+
+[source,typescript]
+----
+include::partial$test.ts[]
+----
+
+Include of symlink to source file:
+
+[source,typescript]
+----
+include::partial$link-to-test.ts[]
+----
