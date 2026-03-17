@@ -21,9 +21,18 @@ export async function findFiles (glob: string): Promise<Uri[]> {
   const uris = await vscode.workspace.findFiles(glob, '**/node_modules/**')
   const watcher = vscode.workspace.createFileSystemWatcher(glob)
 
-  const invalidate = () => { cache.delete(glob) }
-  watcher.onDidCreate(invalidate)
-  watcher.onDidDelete(invalidate)
+  watcher.onDidCreate((uri) => {
+    const entry = cache.get(glob)
+    if (entry) {
+      entry.uris.push(uri)
+    }
+  })
+  watcher.onDidDelete((uri) => {
+    const entry = cache.get(glob)
+    if (entry) {
+      entry.uris = entry.uris.filter((u) => u.toString() !== uri.toString())
+    }
+  })
 
   cache.set(glob, { uris, watcher })
   return uris
