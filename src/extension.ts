@@ -26,12 +26,18 @@ import {
   ExtensionContentSecurityPolicyArbiter,
   PreviewSecuritySelector,
 } from './security'
-import { disposeFindFilesCache } from './util/findFiles'
+import { disposeFindFilesCache, initFindFilesCache } from './util/findFiles'
 import { AsciidocTargetPathAutoCompletionMonitor } from './util/includeAutoCompletion'
 
 export async function activate(context: vscode.ExtensionContext) {
   // Set context as a global as some tests depend on it
   ;(global as any).testExtensionContext = context
+
+  // Initialize findFiles disk cache for fast startup
+  const cacheStorageUri = context.storageUri ?? context.globalStorageUri
+  await vscode.workspace.fs.createDirectory(cacheStorageUri)
+  initFindFilesCache(cacheStorageUri.fsPath)
+
   const contributionProvider = getAsciidocExtensionContributions(context)
   const asciidoctorExtensionsSecurityPolicy =
     AsciidoctorExtensionsSecurityPolicyArbiter.activate(context)
